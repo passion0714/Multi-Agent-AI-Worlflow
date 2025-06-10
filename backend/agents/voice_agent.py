@@ -62,15 +62,43 @@ class VoiceAgent:
         
         # Update status to calling
         self._update_lead_status(lead, LeadStatus.CALLING, db)
+        db.commit()  # Ensure status is committed
         
-        # Prepare call data
+        # Validate phone number
+        if not lead.phone1 or len(lead.phone1.strip()) < 10:
+            error_msg = f"Invalid phone number: {lead.phone1}"
+            logger.error(error_msg)
+            self._update_lead_status(lead, LeadStatus.CALL_FAILED, db, error=error_msg)
+            db.commit()
+            return
+            
+        # Check if this is a valid time to call based on compliance rules
+        is_valid_time = await self.vapi_service.is_valid_call_time(lead.phone1)
+        if not is_valid_time:
+            error_msg = f"Outside of allowed calling hours for number: {lead.phone1}"
+            logger.warning(error_msg)
+            # Set back to pending for retry later
+            self._update_lead_status(lead, LeadStatus.PENDING, db, error=error_msg)
+            db.commit()
+            return
+        
+        # Debug log the phone number
+        logger.info(f"Phone number for outbound call: '{lead.phone1}'")
+        
+        # Format phone number to E.164 format
+        formatted_phone = self.vapi_service._format_phone_number(lead.phone1.strip())
+        
+        # Prepare call data with proper customer.number field
         call_data = {
-            "assistant_id": os.getenv("VAPI_ASSISTANT_ID"),
-            "phone_number": lead.phone1,
+            "assistant_id": os.getenv("VAPI_ASSISTANT_ID", "08301bb7-72c5-466c-a0ba-ca54d429c93e"),  # Zoe from Eluminus
+            "customer": {
+                "number": formatted_phone
+            },
             "lead_data": {
                 "first_name": lead.first_name,
                 "last_name": lead.last_name,
                 "email": lead.email,
+                "phone": lead.phone1,
                 "address": lead.address,
                 "city": lead.city,
                 "state": lead.state,

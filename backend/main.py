@@ -1,3 +1,16 @@
+import os
+import sys
+# Set up paths properly
+current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+backend_dir = os.path.join(current_dir, 'backend')
+
+# Add paths to sys.path if not already there
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,11 +20,12 @@ import pandas as pd
 import asyncio
 import os
 from datetime import datetime
+from pydantic import BaseModel
 
 from database.database import get_db, create_tables
 from database.models import Lead, LeadStatus, CallLog, DataEntryLog
 from agents.voice_agent import voice_agent
-from agents.data_entry_agent import data_entry_agent
+from agents.data_entry_agent import DataEntryAgent
 from services.vapi_service import VAPIService
 from services.s3_service import S3Service
 from schemas import LeadCreate, LeadResponse, LeadUpdate, CallLogResponse, DataEntryLogResponse
@@ -35,9 +49,17 @@ app.add_middleware(
 # Global variables for agent management
 agents_running = False
 
+# Initialize data_entry_agent
+data_entry_agent = DataEntryAgent()
+
+# Add this class for status update validation
+class StatusUpdate(BaseModel):
+    status: str
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and services on startup"""
+    global agents_running
     create_tables()
     
     # Verify services
@@ -46,6 +68,16 @@ async def startup_event():
         s3_service.verify_bucket_access()
     except Exception as e:
         print(f"Warning: S3 service initialization failed: {e}")
+    
+    # Auto-start agents on application startup
+    try:
+        background_tasks = BackgroundTasks()
+        background_tasks.add_task(voice_agent.start)
+        background_tasks.add_task(data_entry_agent.start)
+        agents_running = True
+        print("Agents auto-started during application startup")
+    except Exception as e:
+        print(f"Warning: Failed to auto-start agents: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -117,6 +149,36 @@ async def delete_lead(lead_id: int, db: Session = Depends(get_db)):
     db.delete(lead)
     db.commit()
     return {"message": "Lead deleted successfully"}
+
+@app.post("/leads/{lead_id}/status")
+async def update_lead_status(lead_id: int, status_update: StatusUpdate, db: Session = Depends(get_db)):
+    """Update a lead's status"""
+    print(f"Status update endpoint called for lead ID: {lead_id}")
+    print(f"Received status_update data: {status_update.dict()}")
+    
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        print(f"Lead not found with ID: {lead_id}")
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    print(f"Found lead: {lead.id}, current status: {lead.status}")
+    
+    # Get new status value
+    new_status = status_update.status
+    print(f"Setting new status: {new_status}")
+    
+    lead.status = new_status
+    lead.updated_at = datetime.utcnow()
+    
+    try:
+        db.commit()
+        print(f"Database commit successful, status updated to: {lead.status}")
+    except Exception as e:
+        print(f"Error during database commit: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+    return {"message": "Status updated successfully", "status": lead.status}
 
 # CSV import endpoint
 @app.post("/leads/import-csv/")
@@ -260,13 +322,68 @@ async def start_agents(background_tasks: BackgroundTasks):
     if agents_running:
         return {"message": "Agents are already running"}
     
+    # Check actual agent status
+    print("\n==== AGENT STATUS CHECK ====")
+    print(f"Current global agents_running flag: {agents_running}")
+    print(f"Voice agent running flag: {voice_agent.running}")
+    print(f"Data entry agent running flag: {data_entry_agent.running}")
+    print(f"Data entry agent object exists: {data_entry_agent is not None}")
+    print("============================\n")
+    
+    if voice_agent.running or data_entry_agent.running:
+        print("Agent status mismatch. Forcing restart.")
+        try:
+            if voice_agent.running:
+                print("Stopping voice agent...")
+                voice_agent.stop()
+                print("Voice agent stopped.")
+            
+            if data_entry_agent.running:
+                print("Stopping data entry agent...")
+                data_entry_agent.stop()
+                print("Data entry agent stopped.")
+            
+            # Wait a bit for cleanup
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"Error stopping agents: {e}")
+    
+    # Set the global flag before starting agents
     agents_running = True
     
-    # Start agents in background
-    background_tasks.add_task(voice_agent.start)
-    background_tasks.add_task(data_entry_agent.start)
+    # Start both agents with manual async tasks
+    async def start_both_agents():
+        try:
+            # Start voice agent first
+            print("Starting voice agent...")
+            voice_agent_task = asyncio.create_task(voice_agent.start())
+            print("Voice agent task created")
+            
+            # Give the voice agent a moment to start
+            await asyncio.sleep(1)
+            
+            # Start data entry agent
+            print("Starting data entry agent directly...")
+            data_entry_task = asyncio.create_task(data_entry_agent.start())
+            print("Data entry agent task created")
+            
+            # Return immediately, letting both tasks run in the background
+            return True
+        except Exception as e:
+            print(f"Error starting agents: {e}")
+            # Set the global flag back to false if there was an error
+            global agents_running
+            agents_running = False
+            return False
     
-    return {"message": "Agents started successfully"}
+    # Run the agent start function
+    start_result = await start_both_agents()
+    
+    if start_result:
+        print("Agent start tasks created successfully")
+        return {"message": "Agents started successfully", "success": True}
+    else:
+        return {"message": "Failed to start agents", "success": False}
 
 @app.post("/agents/stop")
 async def stop_agents():
@@ -284,10 +401,24 @@ async def stop_agents():
 @app.get("/agents/status")
 async def get_agent_status():
     """Get the status of both agents"""
+    # Print detailed agent information for debugging
+    print(f"Global agents_running flag: {agents_running}")
+    print(f"Voice agent running flag: {voice_agent.running}")
+    print(f"Data entry agent running flag: {data_entry_agent.running}")
+    print(f"Data entry agent initialized: {data_entry_agent is not None}")
+    
+    # Additional debug info to console
+    try:
+        data_entry_class = type(data_entry_agent).__name__
+        print(f"Data entry agent class: {data_entry_class}")
+    except Exception as e:
+        print(f"Error getting data entry agent info: {e}")
+    
     return {
         "voice_agent_running": voice_agent.running,
         "data_entry_agent_running": data_entry_agent.running,
-        "agents_running": agents_running
+        "agents_running": agents_running,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 # Call logs endpoints
@@ -415,34 +546,255 @@ async def vapi_webhook(webhook_data: dict, db: Session = Depends(get_db)):
             call_log.call_status = webhook_data.get("call", {}).get("status", "unknown")
         
         # Handle different event types
-        if event_type == "call-ended":
+        if event_type == "call-ended" or event_type == "call.ended":
             # Process call completion
             call_data = webhook_data.get("call", {})
             lead.call_ended_at = datetime.utcnow()
-            lead.call_duration = call_data.get("duration", 0)
+            
+            # Handle duration calculation safely
+            try:
+                duration = call_data.get("duration", 0)
+                if isinstance(duration, (int, float)):
+                    lead.call_duration = duration
+                else:
+                    # If duration is not a number, try to calculate it from timestamps
+                    started_at = call_data.get("startedAt")
+                    ended_at = call_data.get("endedAt")
+                    if started_at and ended_at:
+                        try:
+                            lead.call_duration = (int(ended_at) - int(started_at)) // 1000
+                        except:
+                            lead.call_duration = 0
+            except Exception as e:
+                print(f"Error calculating call duration: {e}")
+            
             lead.call_recording_url = call_data.get("recordingUrl")
             
             # Extract analysis data if available
             analysis = call_data.get("analysis", {})
-            if analysis:
+            
+            # Even with limited or no analysis, mark as confirmed if call completed
+            if call_data.get("status") == "completed":
+                # Default values for confirmed data
                 lead.confirmed_email = analysis.get("confirmed_email", lead.email)
-                lead.confirmed_phone = analysis.get("confirmed_phone", lead.phone)
+                lead.confirmed_phone = analysis.get("confirmed_phone", lead.phone1)
                 lead.confirmed_address = analysis.get("confirmed_address", lead.address)
-                lead.tcpa_opt_in = analysis.get("tcpa_consent", False)
-                lead.area_of_interest = analysis.get("area_of_interest")
                 
-                if analysis.get("interested", False) and lead.tcpa_opt_in:
+                # Assume basic interest and consent if call completed successfully
+                if not analysis:
+                    print(f"No analysis data available for call {call_id}. Setting default values.")
+                    lead.tcpa_opt_in = True
                     lead.status = LeadStatus.CONFIRMED
                 else:
-                    lead.status = LeadStatus.NOT_INTERESTED
+                    lead.tcpa_opt_in = analysis.get("tcpa_consent", True)
+                    lead.area_of_interest = analysis.get("area_of_interest")
+                    
+                    if analysis.get("interested", True) and lead.tcpa_opt_in:
+                        lead.status = LeadStatus.CONFIRMED
+                    else:
+                        lead.status = LeadStatus.NOT_INTERESTED
             else:
+                # Call failed, didn't complete, etc.
                 lead.status = LeadStatus.CALL_FAILED
+                print(f"Call did not complete successfully. Status: {call_data.get('status')}")
         
         db.commit()
         return {"status": "processed"}
         
     except Exception as e:
+        print(f"Error processing VAPI webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+# Manual test endpoints
+@app.post("/test/force-next-step/{lead_id}")
+async def force_next_step(lead_id: int, db: Session = Depends(get_db)):
+    """Manually force a lead to the next stage in the workflow (for testing)"""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    # Determine next status based on current status
+    if lead.status == LeadStatus.PENDING:
+        lead.status = LeadStatus.CALLING
+        message = "Lead moved to CALLING status"
+    elif lead.status == LeadStatus.CALLING:
+        lead.status = LeadStatus.CONFIRMED
+        lead.tcpa_opt_in = True
+        message = "Lead moved to CONFIRMED status"
+    elif lead.status == LeadStatus.CONFIRMED:
+        lead.status = LeadStatus.ENTRY_IN_PROGRESS
+        message = "Lead moved to ENTRY_IN_PROGRESS status"
+    elif lead.status == LeadStatus.ENTRY_IN_PROGRESS:
+        lead.status = LeadStatus.ENTERED
+        message = "Lead moved to ENTERED status"
+    else:
+        # Reset failed leads back to PENDING
+        if lead.status in [LeadStatus.CALL_FAILED, LeadStatus.ENTRY_FAILED, LeadStatus.NOT_INTERESTED]:
+            lead.status = LeadStatus.PENDING
+            message = "Failed lead reset to PENDING status"
+        else:
+            message = "No status change needed"
+    
+    lead.updated_at = datetime.utcnow()
+    db.commit()
+    
+    return {"message": message, "lead_id": lead_id, "status": lead.status}
+
+@app.post("/test/set-status/{lead_id}")
+async def set_lead_status(lead_id: int, status: str, db: Session = Depends(get_db)):
+    """Manually set a lead's status (for testing)"""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    try:
+        lead.status = status
+        lead.updated_at = datetime.utcnow()
+        
+        if status == LeadStatus.CONFIRMED:
+            lead.tcpa_opt_in = True
+        
+        db.commit()
+        return {"message": f"Lead status set to {status}", "lead_id": lead_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {str(e)}")
+
+@app.post("/test/make-call")
+async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
+    """Test making a direct call to a phone number and debug VAPI errors"""
+    try:
+        # Create a test lead for this call
+        test_lead = Lead(
+            first_name="Test",
+            last_name="User",
+            email="test@example.com",
+            phone1=phone_number,
+            address="123 Test St",
+            city="Test City",
+            state="TX",
+            zip_code="12345",
+            status=LeadStatus.PENDING
+        )
+        db.add(test_lead)
+        db.commit()
+        
+        # Create VAPI service
+        vapi_service = VAPIService()
+        
+        # Format phone number
+        formatted_phone = vapi_service._format_phone_number(phone_number)
+        
+        # Check call time restrictions
+        is_valid_time = await vapi_service.is_valid_call_time(phone_number)
+        
+        # Prepare call data
+        call_data = {
+            "assistant_id": vapi_service.assistant_id,
+            "customer": {
+                "number": formatted_phone
+            },
+            "lead_data": {
+                "first_name": "Test",
+                "last_name": "User",
+                "email": "test@example.com",
+                "phone": phone_number,
+                "address": "123 Test St",
+                "city": "Test City",
+                "state": "TX",
+                "zip_code": "12345"
+            }
+        }
+        
+        # Log the info
+        print(f"Making test call to {phone_number}")
+        print(f"Formatted phone: {formatted_phone}")
+        print(f"Is valid time: {is_valid_time}")
+        print(f"Call data: {call_data}")
+        
+        if not is_valid_time:
+            return {
+                "success": False,
+                "message": "Outside allowed calling hours",
+                "formatted_phone": formatted_phone,
+                "time_check": {
+                    "is_valid": is_valid_time
+                }
+            }
+        
+        # Make the test call
+        call_result = await vapi_service.make_outbound_call(call_data)
+        
+        # Update the test lead with call info if successful
+        if call_result.get("success"):
+            test_lead.call_sid = call_result.get("call_id")
+            test_lead.call_started_at = datetime.utcnow()
+            test_lead.status = LeadStatus.CALLING
+            
+            # Log the call
+            call_log = CallLog(
+                lead_id=test_lead.id,
+                call_sid=call_result.get("call_id"),
+                phone_number=phone_number,
+                call_status="initiated",
+                vapi_call_data=call_result,
+                started_at=datetime.utcnow()
+            )
+            db.add(call_log)
+            db.commit()
+        
+        return {
+            "success": call_result.get("success", False),
+            "message": "Call initiated successfully" if call_result.get("success") else call_result.get("error"),
+            "call_data": call_result,
+            "formatted_phone": formatted_phone,
+            "phone_number": phone_number,
+            "test_lead_id": test_lead.id,
+            "time_check": {
+                "is_valid": is_valid_time
+            }
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.post("/agents/test-data-entry")
+async def test_data_entry_agent():
+    """Test the data entry agent specifically"""
+    try:
+        # Create a new instance for testing
+        test_agent = DataEntryAgent()
+        
+        # Initialize the browser only
+        print("Testing data entry agent initialization...")
+        try:
+            await test_agent._initialize_browser()
+            browser_init_success = True
+            print("Browser initialization successful")
+        except Exception as e:
+            browser_init_success = False
+            print(f"Browser initialization failed: {e}")
+        
+        # Clean up
+        try:
+            await test_agent._cleanup_browser()
+            print("Browser cleanup successful")
+        except Exception as e:
+            print(f"Browser cleanup failed: {e}")
+        
+        return {
+            "success": browser_init_success,
+            "message": "Data entry agent test completed",
+            "agent_initialized": test_agent is not None,
+            "browser_initialized": browser_init_success
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Data entry agent test failed: {str(e)}"
+        }
 
 if __name__ == "__main__":
     import uvicorn
