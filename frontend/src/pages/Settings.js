@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -14,6 +14,16 @@ import {
   ListItemText,
   ListItemIcon,
   Chip,
+  TextField,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  IconButton,
+  Snackbar,
+  Alert,
 } from '@mui/material';
 import {
   Settings as SettingsIcon,
@@ -22,9 +32,87 @@ import {
   Cloud as CloudIcon,
   Security as SecurityIcon,
   Assessment as AssessmentIcon,
+  PhoneCallback as PhoneCallbackIcon,
+  Save as SaveIcon,
 } from '@mui/icons-material';
+import axios from 'axios';
+
+const api = axios.create({
+  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
+});
 
 function Settings() {
+  const [callSettings, setCallSettings] = useState({
+    day1: 5,
+    day2: 4,
+    day3: 2,
+    day4: 2,
+    day5: 2,
+    day6: 0,
+  });
+
+  const [loading, setLoading] = useState(false);
+  const [snackbar, setSnackbar] = useState({
+    open: false,
+    message: '',
+    severity: 'success'
+  });
+
+  // Fetch call settings on component mount
+  useEffect(() => {
+    fetchCallSettings();
+  }, []);
+
+  const fetchCallSettings = async () => {
+    try {
+      setLoading(true);
+      const response = await api.get('/settings/call-attempts');
+      setCallSettings(response.data);
+    } catch (error) {
+      console.error('Failed to fetch call settings:', error);
+      setSnackbar({
+        open: true,
+        message: `Error loading settings: ${error.response?.data?.detail || error.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCloseSnackbar = () => {
+    setSnackbar({ ...snackbar, open: false });
+  };
+
+  const handleCallSettingChange = (day, value) => {
+    const numValue = parseInt(value, 10) || 0;
+    setCallSettings({
+      ...callSettings,
+      [day]: numValue
+    });
+  };
+
+  const saveCallSettings = async () => {
+    try {
+      setLoading(true);
+      await api.post('/settings/call-attempts', callSettings);
+      
+      setSnackbar({
+        open: true,
+        message: 'Call attempt settings saved successfully!',
+        severity: 'success'
+      });
+    } catch (error) {
+      setSnackbar({
+        open: true,
+        message: `Error saving settings: ${error.response?.data?.detail || error.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const configSections = [
     {
       title: 'VAPI Configuration',
@@ -112,6 +200,102 @@ function Settings() {
         </Grid>
       </Paper>
 
+      {/* Call Attempt Settings */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+          <PhoneCallbackIcon sx={{ mr: 1 }} />
+          Call Attempt Settings
+        </Typography>
+        <Typography variant="body2" color="textSecondary" paragraph>
+          Configure the maximum number of call attempts per day for follow-up calls.
+        </Typography>
+        
+        <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Day</TableCell>
+                <TableCell>Maximum Attempts</TableCell>
+                <TableCell>Description</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              <TableRow>
+                <TableCell>Day 1</TableCell>
+                <TableCell>
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={callSettings.day1}
+                    onChange={(e) => handleCallSettingChange('day1', e.target.value)}
+                    inputProps={{ min: 0, max: 10 }}
+                    sx={{ width: '80px' }}
+                  />
+                </TableCell>
+                <TableCell>First day of call attempts</TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell>Day 2</TableCell>
+                <TableCell>
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={callSettings.day2}
+                    onChange={(e) => handleCallSettingChange('day2', e.target.value)}
+                    inputProps={{ min: 0, max: 10 }}
+                    sx={{ width: '80px' }}
+                  />
+                </TableCell>
+                <TableCell>Second day of call attempts</TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell>Days 3-5</TableCell>
+                <TableCell>
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={callSettings.day3}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      handleCallSettingChange('day3', value);
+                      handleCallSettingChange('day4', value);
+                      handleCallSettingChange('day5', value);
+                    }}
+                    inputProps={{ min: 0, max: 10 }}
+                    sx={{ width: '80px' }}
+                  />
+                </TableCell>
+                <TableCell>Attempts per day for days 3 through 5</TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell>Day 6+</TableCell>
+                <TableCell>
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={callSettings.day6}
+                    onChange={(e) => handleCallSettingChange('day6', e.target.value)}
+                    inputProps={{ min: 0, max: 10 }}
+                    sx={{ width: '80px' }}
+                  />
+                </TableCell>
+                <TableCell>Day 6 and beyond (0 turns off calls)</TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+        
+        <Button 
+          variant="contained" 
+          color="primary" 
+          startIcon={<SaveIcon />}
+          onClick={saveCallSettings}
+          disabled={loading}
+        >
+          {loading ? 'Saving...' : 'Save Call Settings'}
+        </Button>
+      </Paper>
+
       {/* Configuration Sections */}
       <Grid container spacing={3}>
         {configSections.map((section, index) => (
@@ -182,7 +366,7 @@ LEADHOOP_PORTAL_URL=https://leadhoop.com/portal
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=gWNbBxbJpE/vIQ1CKS5wAdl4APkzwzGQJ7tcMW+x
 AWS_REGION=us-east-1
-S3_BUCKET=leadhoop-recordings
+S3_BUCKET=mergeai.call.recordings
 S3_FOLDER=ieim/eluminus_merge_142
 PUBLISHER_ID=142`}
           </pre>
@@ -217,6 +401,18 @@ PUBLISHER_ID=142`}
           </Grid>
         </Grid>
       </Paper>
+
+      {/* Snackbar for notifications */}
+      <Snackbar 
+        open={snackbar.open} 
+        autoHideDuration={6000} 
+        onClose={handleCloseSnackbar}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert onClose={handleCloseSnackbar} severity={snackbar.severity}>
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

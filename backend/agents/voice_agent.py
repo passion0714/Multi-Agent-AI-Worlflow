@@ -1,7 +1,7 @@
 import os
 import asyncio
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from database.database import get_db_session
 from database.models import Lead, LeadStatus, CallLog
 from services.vapi_service import VAPIService
 from services.s3_service import S3Service
+from config.call_settings import CALL_ATTEMPT_SETTINGS, MAX_CALL_DAYS, MAX_TOTAL_ATTEMPTS
 
 class VoiceAgent:
     """AI Voice Agent that handles outbound calls via VAPI"""
@@ -48,13 +49,69 @@ class VoiceAgent:
             
             for lead in pending_leads:
                 try:
-                    await self._process_single_lead(lead, db)
+                    # Check if we should still attempt calls for this lead based on configuration
+                    if await self._should_attempt_call(lead, db):
+                        await self._process_single_lead(lead, db)
+                    else:
+                        # Max attempts reached, mark as no-contact
+                        self._update_lead_status(lead, LeadStatus.NO_CONTACT, db, 
+                                               error="Maximum call attempts reached")
+                        db.commit()
                 except Exception as e:
                     logger.error(f"Error processing lead {lead.id}: {e}")
                     self._update_lead_status(lead, LeadStatus.CALL_FAILED, db, error=str(e))
                     
         finally:
             db.close()
+    
+    async def _should_attempt_call(self, lead: Lead, db: Session) -> bool:
+        """Determine if we should attempt to call this lead based on call settings"""
+        # Get the current call logs for this lead
+        call_logs = db.query(CallLog).filter(CallLog.lead_id == lead.id).all()
+        
+        # If no call logs, this is the first attempt
+        if not call_logs:
+            return True
+            
+        # Calculate days since first call attempt
+        first_call = min(log.started_at for log in call_logs if log.started_at)
+        days_since_first_call = (datetime.utcnow() - first_call).days + 1  # +1 to count today
+        
+        # If beyond max days, don't call
+        if days_since_first_call > MAX_CALL_DAYS:
+            return False
+            
+        # Get max attempts for current day
+        day_settings = CALL_ATTEMPT_SETTINGS.get(
+            min(days_since_first_call, max(CALL_ATTEMPT_SETTINGS.keys()))
+        )
+        
+        # If day config says 0 attempts, don't call
+        if day_settings["max_attempts"] == 0:
+            return False
+            
+        # Count calls made today
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        calls_today = sum(1 for log in call_logs if log.started_at and log.started_at >= today_start)
+        
+        # If reached max attempts for today, don't call
+        if calls_today >= day_settings["max_attempts"]:
+            return False
+            
+        # Check total attempts across all days
+        if len(call_logs) >= MAX_TOTAL_ATTEMPTS:
+            return False
+            
+        # Check if minimum interval has passed since last call
+        if call_logs:
+            last_call = max(log.started_at for log in call_logs if log.started_at)
+            min_interval = timedelta(minutes=day_settings["min_interval_minutes"])
+            
+            if datetime.utcnow() - last_call < min_interval:
+                return False
+                
+        # All checks passed, we can call
+        return True
     
     async def _process_single_lead(self, lead: Lead, db: Session):
         """Process a single lead by making an outbound call"""

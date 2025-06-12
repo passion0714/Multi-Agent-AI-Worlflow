@@ -11,6 +11,7 @@ class LeadStatus(str, Enum):
     CONFIRMED = "confirmed"
     CALL_FAILED = "call_failed"
     NOT_INTERESTED = "not_interested"
+    NO_CONTACT = "no_contact"  # Added for leads that reached max call attempts
     ENTRY_IN_PROGRESS = "entry_in_progress"
     ENTERED = "entered"
     ENTRY_FAILED = "entry_failed"

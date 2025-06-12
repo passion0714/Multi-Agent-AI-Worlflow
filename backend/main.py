@@ -15,10 +15,11 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Backgroun
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import pandas as pd
 import asyncio
 import os
+import json
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -29,6 +30,7 @@ from agents.data_entry_agent import DataEntryAgent
 from services.vapi_service import VAPIService
 from services.s3_service import S3Service
 from schemas import LeadCreate, LeadResponse, LeadUpdate, CallLogResponse, DataEntryLogResponse
+from config.call_settings import CALL_ATTEMPT_SETTINGS, MAX_CALL_DAYS, MAX_TOTAL_ATTEMPTS
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -40,9 +42,9 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["http://3.106.139.75:3000", "http://localhost:3000"],  # Add your frontend domains here
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -56,6 +58,15 @@ data_entry_agent = DataEntryAgent()
 class StatusUpdate(BaseModel):
     status: str
 
+# Add this new class for call settings
+class CallAttemptsSettings(BaseModel):
+    day1: int
+    day2: int
+    day3: int
+    day4: int
+    day5: int
+    day6: int
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and services on startup"""
@@ -68,6 +79,10 @@ async def startup_event():
         s3_service.verify_bucket_access()
     except Exception as e:
         print(f"Warning: S3 service initialization failed: {e}")
+    
+    # Load custom call settings if they exist
+    from config.call_settings import load_custom_settings
+    load_custom_settings()
     
     # Auto-start agents on application startup
     try:
@@ -795,6 +810,63 @@ async def test_data_entry_agent():
             "success": False,
             "message": f"Data entry agent test failed: {str(e)}"
         }
+
+# Add these new endpoints
+
+@app.get("/settings/call-attempts")
+async def get_call_attempts_settings():
+    """Get the current call attempts settings"""
+    try:
+        # First check if a custom settings file exists
+        settings_path = os.path.join(backend_dir, "config", "custom_call_settings.json")
+        if os.path.exists(settings_path):
+            with open(settings_path, "r") as f:
+                custom_settings = json.load(f)
+                return custom_settings
+        
+        # If no custom settings, return the default from call_settings.py
+        return {
+            "day1": CALL_ATTEMPT_SETTINGS[1]["max_attempts"],
+            "day2": CALL_ATTEMPT_SETTINGS[2]["max_attempts"],
+            "day3": CALL_ATTEMPT_SETTINGS[3]["max_attempts"],
+            "day4": CALL_ATTEMPT_SETTINGS[4]["max_attempts"],
+            "day5": CALL_ATTEMPT_SETTINGS[5]["max_attempts"],
+            "day6": CALL_ATTEMPT_SETTINGS[6]["max_attempts"],
+            "max_days": MAX_CALL_DAYS,
+            "max_total_attempts": MAX_TOTAL_ATTEMPTS
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving call settings: {str(e)}")
+
+@app.post("/settings/call-attempts")
+async def save_call_attempts_settings(settings: CallAttemptsSettings):
+    """Save custom call attempts settings"""
+    try:
+        # Create config directory if it doesn't exist
+        os.makedirs(os.path.join(backend_dir, "config"), exist_ok=True)
+        
+        # Save custom settings to JSON file
+        settings_path = os.path.join(backend_dir, "config", "custom_call_settings.json")
+        
+        # Convert to dict for saving
+        settings_dict = settings.dict()
+        
+        # Also update the actual call settings in memory
+        from config.call_settings import CALL_ATTEMPT_SETTINGS
+        CALL_ATTEMPT_SETTINGS[1]["max_attempts"] = settings.day1
+        CALL_ATTEMPT_SETTINGS[2]["max_attempts"] = settings.day2
+        CALL_ATTEMPT_SETTINGS[3]["max_attempts"] = settings.day3
+        CALL_ATTEMPT_SETTINGS[4]["max_attempts"] = settings.day4
+        CALL_ATTEMPT_SETTINGS[5]["max_attempts"] = settings.day5
+        CALL_ATTEMPT_SETTINGS[6]["max_attempts"] = settings.day6
+        
+        # Save to file
+        with open(settings_path, "w") as f:
+            json.dump(settings_dict, f, indent=2)
+            
+        return {"message": "Call attempt settings saved successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving call settings: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

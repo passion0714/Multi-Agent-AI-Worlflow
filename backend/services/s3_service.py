@@ -11,7 +11,7 @@ class S3Service:
         self.access_key = os.getenv("AWS_ACCESS_KEY_ID")
         self.secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         self.region = os.getenv("AWS_REGION", "us-east-1")
-        self.bucket = os.getenv("S3_BUCKET", "leadhoop-recordings")
+        self.bucket = os.getenv("S3_BUCKET", "mergeai.call.recordings")
         self.folder = os.getenv("S3_FOLDER", "ieim/eluminus_merge_142")
         
         if not self.access_key or not self.secret_key:
