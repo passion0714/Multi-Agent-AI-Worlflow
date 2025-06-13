@@ -134,14 +134,34 @@ def format_phone(phone_str):
     # Remove all non-digit characters
     digits_only = re.sub(r'\D', '', str(phone_str))
     
+    # Debug: Print the raw digits
+    print(f"Formatting phone: Raw digits: '{digits_only}'")
+    
+    # Check if the number already ends with '0' which might be a mistake
+    if digits_only.endswith('0') and len(digits_only) > 10:
+        # If it's an 11-digit number ending with 0, it might be an error
+        # Check if it's a pattern like "1234567890" + extra "0"
+        if len(digits_only) == 11 and digits_only[-1] == '0':
+            # Remove the trailing 0
+            digits_only = digits_only[:-1]
+            print(f"Removed trailing 0, now: '{digits_only}'")
+    
     # Ensure US numbers have a "1" prefix
     if len(digits_only) == 10:
+        # 10-digit US number without country code, add "1"
         return f"1{digits_only}"
     elif len(digits_only) == 11 and digits_only.startswith('1'):
+        # 11-digit with "1" prefix, keep as is
         return digits_only
     elif len(digits_only) == 11 and not digits_only.startswith('1'):
+        # 11-digit without "1" prefix, add "1"
         return f"1{digits_only}"
     else:
+        # For any other format, ensure it has "1" prefix
+        # But first check if it's too long and might contain errors
+        if len(digits_only) > 11:
+            # If longer than 11 digits, take only the last 10 and add "1"
+            return f"1{digits_only[-10:]}"
         return f"1{digits_only}"
 
 @app.get("/leads/", response_model=List[LeadResponse])
