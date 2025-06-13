@@ -17,6 +17,7 @@ import {
   FormControl,
   InputLabel,
   Select,
+  Tooltip,
 } from '@mui/material';
 import {
   DataGrid,
@@ -34,6 +35,7 @@ import {
   CheckCircle as CheckCircleIcon,
   Cancel as CancelIcon,
   Schedule as ScheduleIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { format } from 'date-fns';
@@ -66,12 +68,23 @@ const statusLabels = {
   callback_requested: 'Callback Requested',
 };
 
-function CustomToolbar() {
+function CustomToolbar({ selectedRows, onDeleteSelected }) {
   return (
     <GridToolbarContainer>
       <GridToolbarFilterButton />
       <GridToolbarDensitySelector />
       <GridToolbarExport />
+      {selectedRows.length > 0 && (
+        <Tooltip title="Delete selected leads">
+          <Button 
+            color="error" 
+            startIcon={<DeleteIcon />}
+            onClick={onDeleteSelected}
+          >
+            Delete ({selectedRows.length})
+          </Button>
+        </Tooltip>
+      )}
     </GridToolbarContainer>
   );
 }
@@ -94,6 +107,9 @@ function Leads() {
   });
   const [actionMenuAnchor, setActionMenuAnchor] = useState(null);
   const [selectedLead, setSelectedLead] = useState(null);
+  const [selectedRows, setSelectedRows] = useState([]);
+  const [deleteConfirmDialogOpen, setDeleteConfirmDialogOpen] = useState(false);
+  const [deleteMode, setDeleteMode] = useState('single'); // 'single' or 'bulk'
 
   const queryClient = useQueryClient();
 
@@ -255,6 +271,35 @@ function Leads() {
     }
   );
 
+  // Delete lead mutation
+  const deleteLeadMutation = useMutation(
+    (leadId) => api.delete(`/leads/${leadId}`),
+    {
+      onSuccess: () => {
+        toast.success('Lead deleted successfully');
+        queryClient.invalidateQueries('leads');
+      },
+      onError: (error) => {
+        toast.error(`Failed to delete lead: ${error.response?.data?.detail || error.message}`);
+      },
+    }
+  );
+
+  // Bulk delete mutation
+  const bulkDeleteMutation = useMutation(
+    (leadIds) => api.post('/leads/bulk-delete', { lead_ids: leadIds }),
+    {
+      onSuccess: (response) => {
+        toast.success(`Successfully deleted ${response.data.deleted_count} leads`);
+        setSelectedRows([]);
+        queryClient.invalidateQueries('leads');
+      },
+      onError: (error) => {
+        toast.error(`Failed to delete leads: ${error.response?.data?.detail || error.message}`);
+      },
+    }
+  );
+
   const handleFileUpload = () => {
     if (selectedFile) {
       uploadMutation.mutate(selectedFile);
@@ -296,6 +341,29 @@ function Leads() {
   const openStatusUpdateDialog = () => {
     setSelectedStatus(selectedLead?.status || '');
     setStatusUpdateDialogOpen(true);
+    setActionMenuAnchor(null);
+  };
+
+  const handleDeleteConfirm = () => {
+    if (deleteMode === 'single' && selectedLead) {
+      deleteLeadMutation.mutate(selectedLead.id);
+    } else if (deleteMode === 'bulk' && selectedRows.length > 0) {
+      bulkDeleteMutation.mutate(selectedRows);
+    }
+    setDeleteConfirmDialogOpen(false);
+    handleActionClose();
+  };
+
+  const handleDeleteSelected = () => {
+    if (selectedRows.length > 0) {
+      setDeleteMode('bulk');
+      setDeleteConfirmDialogOpen(true);
+    }
+  };
+
+  const openDeleteDialog = () => {
+    setDeleteMode('single');
+    setDeleteConfirmDialogOpen(true);
     setActionMenuAnchor(null);
   };
 
@@ -393,6 +461,15 @@ function Leads() {
           disableSelectionOnClick
           components={{
             Toolbar: CustomToolbar,
+          }}
+          componentsProps={{
+            toolbar: {
+              selectedRows: selectedRows,
+              onDeleteSelected: handleDeleteSelected,
+            },
+          }}
+          onSelectionModelChange={(newSelection) => {
+            setSelectedRows(newSelection);
           }}
           loading={isLoading}
         />
@@ -535,6 +612,32 @@ function Leads() {
         </DialogActions>
       </Dialog>
 
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteConfirmDialogOpen} onClose={() => setDeleteConfirmDialogOpen(false)}>
+        <DialogTitle>Confirm Delete</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {deleteMode === 'single'
+              ? 'Are you sure you want to delete this lead?'
+              : `Are you sure you want to delete ${selectedRows.length} selected leads?`}
+          </Typography>
+          <Typography variant="body2" color="error" sx={{ mt: 2 }}>
+            This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirmDialogOpen(false)}>Cancel</Button>
+          <Button
+            onClick={handleDeleteConfirm}
+            color="error"
+            variant="contained"
+            disabled={deleteLeadMutation.isLoading || bulkDeleteMutation.isLoading}
+          >
+            {deleteLeadMutation.isLoading || bulkDeleteMutation.isLoading ? 'Deleting...' : 'Delete'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Action Menu */}
       <Menu
         anchorEl={actionMenuAnchor}
@@ -584,6 +687,14 @@ function Leads() {
         <MenuItem onClick={openStatusUpdateDialog}>
           <CancelIcon sx={{ mr: 1 }} />
           Update Status
+        </MenuItem>
+        <MenuItem 
+          onClick={openDeleteDialog}
+          disabled={deleteLeadMutation.isLoading}
+          sx={{ color: 'error.main' }}
+        >
+          <DeleteIcon sx={{ mr: 1 }} />
+          Delete Lead
         </MenuItem>
       </Menu>
     </Box>

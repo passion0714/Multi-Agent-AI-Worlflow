@@ -193,6 +193,7 @@ async def delete_lead(lead_id: int, db: Session = Depends(get_db)):
     return {"message": "Lead deleted successfully"}
 
 @app.delete("/leads/bulk-delete")
+@app.post("/leads/bulk-delete")
 async def delete_multiple_leads(leads_delete: LeadsDelete, db: Session = Depends(get_db)):
     """Delete multiple leads at once"""
     if not leads_delete.lead_ids:
