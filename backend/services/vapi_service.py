@@ -92,15 +92,22 @@ class VAPIService:
         digits_only = re.sub(r'\D', '', phone)
         logger.info(f"Digits only: '{digits_only}'")
         
-        # If it's a US number without country code, add +1
+        # Always ensure US numbers have a "1" prefix
         if len(digits_only) == 10:
+            # 10-digit US number without country code, add +1
             formatted = f"+1{digits_only}"
-        elif len(digits_only) == 11 and digits_only.startswith('1'):
-            formatted = f"+{digits_only}"
+        elif len(digits_only) == 11:
+            if digits_only.startswith('1'):
+                # 11-digit with "1" prefix, add "+"
+                formatted = f"+{digits_only}"
+            else:
+                # 11-digit without "1" prefix, add "+1"
+                formatted = f"+1{digits_only}"
         elif phone.startswith('+'):
+            # Already has "+" prefix, keep as is
             formatted = phone
         else:
-            # Assume US number and add +1
+            # For any other format, ensure it has "+1" prefix
             formatted = f"+1{digits_only}"
             
         logger.info(f"Formatted phone number: '{formatted}'")

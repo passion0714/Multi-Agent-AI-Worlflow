@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 # Set up paths properly
 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 backend_dir = os.path.join(current_dir, 'backend')
@@ -67,6 +68,10 @@ class CallAttemptsSettings(BaseModel):
     day5: int
     day6: int
 
+# Add this new class for bulk delete validation
+class LeadsDelete(BaseModel):
+    lead_ids: List[int]
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and services on startup"""
@@ -111,11 +116,33 @@ async def health_check():
 @app.post("/leads/", response_model=LeadResponse)
 async def create_lead(lead: LeadCreate, db: Session = Depends(get_db)):
     """Create a new lead"""
+    # Format the phone number if present
+    if lead.phone1:
+        lead.phone1 = format_phone(lead.phone1)
+        
     db_lead = Lead(**lead.dict())
     db.add(db_lead)
     db.commit()
     db.refresh(db_lead)
     return db_lead
+
+# Define the format_phone function at module level for reuse
+def format_phone(phone_str):
+    if not phone_str:
+        return None
+    
+    # Remove all non-digit characters
+    digits_only = re.sub(r'\D', '', str(phone_str))
+    
+    # Ensure US numbers have a "1" prefix
+    if len(digits_only) == 10:
+        return f"1{digits_only}"
+    elif len(digits_only) == 11 and digits_only.startswith('1'):
+        return digits_only
+    elif len(digits_only) == 11 and not digits_only.startswith('1'):
+        return f"1{digits_only}"
+    else:
+        return f"1{digits_only}"
 
 @app.get("/leads/", response_model=List[LeadResponse])
 async def get_leads(
@@ -164,6 +191,35 @@ async def delete_lead(lead_id: int, db: Session = Depends(get_db)):
     db.delete(lead)
     db.commit()
     return {"message": "Lead deleted successfully"}
+
+@app.delete("/leads/bulk-delete")
+async def delete_multiple_leads(leads_delete: LeadsDelete, db: Session = Depends(get_db)):
+    """Delete multiple leads at once"""
+    if not leads_delete.lead_ids:
+        raise HTTPException(status_code=400, detail="No lead IDs provided")
+    
+    deleted_count = 0
+    not_found = []
+    
+    for lead_id in leads_delete.lead_ids:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if lead:
+            db.delete(lead)
+            deleted_count += 1
+        else:
+            not_found.append(lead_id)
+    
+    db.commit()
+    
+    result = {
+        "message": f"Successfully deleted {deleted_count} leads",
+        "deleted_count": deleted_count
+    }
+    
+    if not_found:
+        result["not_found"] = not_found
+    
+    return result
 
 @app.post("/leads/{lead_id}/status")
 async def update_lead_status(lead_id: int, status_update: StatusUpdate, db: Session = Depends(get_db)):
@@ -262,7 +318,7 @@ async def import_leads_from_csv(file: UploadFile = File(...), db: Session = Depe
                     'first_name': str(row.get('first_name', '')).strip() if pd.notna(row.get('first_name')) else None,
                     'last_name': str(row.get('last_name', '')).strip() if pd.notna(row.get('last_name')) else None,
                     'email': str(row.get('email', '')).strip() if pd.notna(row.get('email')) else None,
-                    'phone1': str(row.get('phone1', '')).strip() if pd.notna(row.get('phone1')) else None,
+                    'phone1': format_phone(row.get('phone1')),
                     'test': str(row.get('test', '')).strip() if pd.notna(row.get('test')) else None,
                     'address': str(row.get('address', '')).strip() if pd.notna(row.get('address')) else None,
                     'address2': str(row.get('address2', '')).strip() if pd.notna(row.get('address2')) else None,
@@ -678,12 +734,15 @@ async def set_lead_status(lead_id: int, status: str, db: Session = Depends(get_d
 async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
     """Test making a direct call to a phone number and debug VAPI errors"""
     try:
+        # Format the phone number
+        formatted_phone_number = format_phone(phone_number)
+        
         # Create a test lead for this call
         test_lead = Lead(
             first_name="Test",
             last_name="User",
             email="test@example.com",
-            phone1=phone_number,
+            phone1=formatted_phone_number,
             address="123 Test St",
             city="Test City",
             state="TX",
@@ -697,10 +756,10 @@ async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
         vapi_service = VAPIService()
         
         # Format phone number
-        formatted_phone = vapi_service._format_phone_number(phone_number)
+        formatted_phone = vapi_service._format_phone_number(formatted_phone_number)
         
         # Check call time restrictions
-        is_valid_time = await vapi_service.is_valid_call_time(phone_number)
+        is_valid_time = await vapi_service.is_valid_call_time(formatted_phone_number)
         
         # Prepare call data
         call_data = {
@@ -712,7 +771,7 @@ async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
                 "first_name": "Test",
                 "last_name": "User",
                 "email": "test@example.com",
-                "phone": phone_number,
+                "phone": formatted_phone_number,
                 "address": "123 Test St",
                 "city": "Test City",
                 "state": "TX",
@@ -749,7 +808,7 @@ async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
             call_log = CallLog(
                 lead_id=test_lead.id,
                 call_sid=call_result.get("call_id"),
-                phone_number=phone_number,
+                phone_number=formatted_phone_number,
                 call_status="initiated",
                 vapi_call_data=call_result,
                 started_at=datetime.utcnow()
@@ -763,6 +822,8 @@ async def test_make_call(phone_number: str, db: Session = Depends(get_db)):
             "call_data": call_result,
             "formatted_phone": formatted_phone,
             "phone_number": phone_number,
+            "original_phone": phone_number,
+            "formatted_phone_number": formatted_phone_number,
             "test_lead_id": test_lead.id,
             "time_check": {
                 "is_valid": is_valid_time
