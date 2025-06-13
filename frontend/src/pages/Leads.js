@@ -179,7 +179,7 @@ function Leads() {
   const makeCallMutation = useMutation(
     (leadId) => api.post(`/leads/${leadId}/make-call`),
     {
-      onSuccess: (response) => {
+      onSuccess: (response, leadId) => {
         toast.success('Call initiated successfully');
         queryClient.invalidateQueries('leads');
         
