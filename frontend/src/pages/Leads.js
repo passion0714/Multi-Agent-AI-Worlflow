@@ -304,7 +304,7 @@ function Leads() {
     { field: 'first_name', headerName: 'First Name', width: 120 },
     { field: 'last_name', headerName: 'Last Name', width: 120 },
     { field: 'email', headerName: 'Email', width: 200 },
-    { field: 'phone', headerName: 'Phone', width: 130 },
+    { field: 'phone1', headerName: 'Phone', width: 130 },
     { field: 'address', headerName: 'Address', width: 200 },
     { field: 'city', headerName: 'City', width: 100 },
     { field: 'state', headerName: 'State', width: 80 },
