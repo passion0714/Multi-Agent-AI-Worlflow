@@ -455,8 +455,8 @@ function Leads() {
         <DataGrid
           rows={leads || []}
           columns={columns}
-          pageSize={25}
-          rowsPerPageOptions={[25, 50, 100]}
+          pageSize={100}
+          rowsPerPageOptions={[25, 50, 100, 500, 1000]}
           checkboxSelection
           disableSelectionOnClick
           components={{

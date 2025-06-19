@@ -167,7 +167,7 @@ def format_phone(phone_str):
 @app.get("/leads/", response_model=List[LeadResponse])
 async def get_leads(
     skip: int = 0, 
-    limit: int = 100, 
+    limit: int = 10000,  # Increased from 100 to 10000 to show all leads
     status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):

@@ -130,17 +130,17 @@ class VoiceAgent:
             return
             
         # Check if this is a valid time to call based on compliance rules
-        # is_valid_time = await self.vapi_service.is_valid_call_time(lead.phone1)
-        # if not is_valid_time:
-        #     error_msg = f"Outside of allowed calling hours for number: {lead.phone1}"
-        #     logger.warning(error_msg)
-        #     # Set back to pending for retry later
-        #     self._update_lead_status(lead, LeadStatus.PENDING, db, error=error_msg)
-        #     db.commit()
-        #     return
+        is_valid_time = await self.vapi_service.is_valid_call_time(lead.phone1)
+        if not is_valid_time:
+            error_msg = f"Outside of allowed calling hours for number: {lead.phone1}"
+            logger.warning(error_msg)
+            # Set back to pending for retry later
+            self._update_lead_status(lead, LeadStatus.PENDING, db, error=error_msg)
+            db.commit()
+            return
         
-        # # Debug log the phone number
-        # logger.info(f"Phone number for outbound call: '{lead.phone1}'")
+        # Debug log the phone number
+        logger.info(f"Phone number for outbound call: '{lead.phone1}'")
         
         # Format phone number to E.164 format
         formatted_phone = self.vapi_service._format_phone_number(lead.phone1.strip())

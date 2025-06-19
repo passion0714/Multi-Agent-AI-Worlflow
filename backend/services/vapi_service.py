@@ -186,8 +186,7 @@ class VAPIService:
                 "assistantOverrides": {
                     "variableValues": {
                         "leadData": call_data["lead_data"]
-                    },
-                    "firstMessage": self._generate_first_message(call_data["lead_data"])
+                    }
                 }
             }
             
