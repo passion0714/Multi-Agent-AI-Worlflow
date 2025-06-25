@@ -1,9 +1,10 @@
 import os
 import httpx
+import asyncio
 from typing import Dict, Any, Optional
 from loguru import logger
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from dateutil import parser
 import pytz
 
@@ -12,10 +13,18 @@ class VAPIService:
     
     def __init__(self):
         self.api_key = os.getenv("VAPI_API_KEY")
-        self.phone_number = os.getenv("VAPI_PHONE_NUMBER")
-        self.phone_number_id = os.getenv("VAPI_PHONE_NUMBER_ID")
-        self.assistant_id = os.getenv("VAPI_ASSISTANT_ID", "08301bb7-72c5-466c-a0ba-ca54d429c93e")  # Zoe from Eluminus
+        if not self.api_key:
+            raise ValueError("VAPI_API_KEY environment variable is required")
+            
         self.base_url = "https://api.vapi.ai"
+        self.assistant_id = os.getenv("VAPI_ASSISTANT_ID", "08301bb7-72c5-466c-a0ba-ca54d429c93e")
+        
+        logger.info(f"VAPI Service initialized with Assistant ID: {self.assistant_id}")
+        
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
         
         # Call time settings for TCPA compliance
         self.min_call_hour = 9  # 9:00 AM
@@ -74,10 +83,7 @@ class VAPIService:
         # Validate required configuration
         if not self.api_key:
             raise ValueError("VAPI_API_KEY environment variable is required")
-        if not self.phone_number_id:
-            logger.warning("VAPI_PHONE_NUMBER_ID not configured - calls will fail")
-        if not self.assistant_id:
-            logger.warning("VAPI_ASSISTANT_ID not configured - calls will fail")
+        # Note: phone_number_id no longer required - VAPI handles this automatically
     
     def _format_phone_number(self, phone: str) -> str:
         """Format phone number to E.164 format"""
@@ -131,150 +137,130 @@ class VAPIService:
             return None
     
     async def make_outbound_call(self, call_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Make an outbound call via VAPI"""
+        """Make an outbound call via VAPI API"""
+        logger.info(f"=== VAPI OUTBOUND CALL ATTEMPT ===")
+        logger.info(f"Target phone: {call_data.get('customer', {}).get('number')}")
+        logger.info(f"Assistant ID: {call_data.get('assistant_id')}")
+        
         try:
-            # Validate configuration
-            if not self.phone_number_id:
-                return {
-                    "success": False,
-                    "error": "VAPI_PHONE_NUMBER_ID not configured. Please set this in your .env file."
-                }
-            
-            if not self.assistant_id:
-                return {
-                    "success": False,
-                    "error": "VAPI_ASSISTANT_ID not configured. Please set this in your .env file."
-                }
+            # Ensure phone number is properly formatted
+            phone_number = call_data.get("customer", {}).get("number")
+            if not phone_number:
+                error_msg = "No phone number provided"
+                logger.error(f"VAPI Error: {error_msg}")
+                return {"success": False, "error": error_msg}
                 
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            formatted_phone = self._format_phone_number(phone_number)
+            logger.info(f"Phone number formatted: {phone_number} -> {formatted_phone}")
             
-            # Check if call_data already has customer.number set
-            if "customer" in call_data and "number" in call_data["customer"]:
-                customer_number = call_data["customer"]["number"]
-                logger.info(f"Using provided customer.number: {customer_number}")
-            elif "phone_number" in call_data:
-                # Format phone number to E.164
-                phone_number = call_data["phone_number"]
-                customer_number = self._format_phone_number(phone_number)
-                logger.info(f"Formatted phone_number {phone_number} to {customer_number}")
-            else:
-                error_msg = f"Missing phone number in call_data: {call_data}"
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "error": error_msg
-                }
-            
-            if not customer_number:
-                error_msg = f"Failed to format phone number"
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "error": error_msg
-                }
-            
-            # Prepare call payload
+            # Prepare the VAPI call payload - DO NOT override assistant settings
             payload = {
-                "phoneNumberId": self.phone_number_id,
-                "assistantId": self.assistant_id,
+                "assistantId": call_data.get("assistant_id", self.assistant_id),
                 "customer": {
-                    "number": customer_number
+                    "number": formatted_phone
                 },
+                # Pass lead data for context but don't override the assistant prompt
                 "assistantOverrides": {
                     "variableValues": {
-                        "leadData": call_data["lead_data"]
+                        "leadData": call_data.get("lead_data", {})
                     }
                 }
             }
             
-            # Log the full payload for debugging
-            logger.info(f"VAPI call payload: {payload}")
-            logger.info(f"Making VAPI call to {customer_number} with assistant {self.assistant_id}")
+            logger.info(f"VAPI Call Payload: {payload}")
             
-            async with httpx.AsyncClient() as client:
+            # Make the API call to VAPI
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                logger.info("Making HTTP request to VAPI...")
                 response = await client.post(
                     f"{self.base_url}/call",
-                    headers=headers,
-                    json=payload,
-                    timeout=30.0
+                    headers=self.headers,
+                    json=payload
                 )
                 
+                logger.info(f"VAPI Response Status: {response.status_code}")
+                logger.info(f"VAPI Response Headers: {dict(response.headers)}")
+                
+                # Parse response
                 if response.status_code == 201:
-                    call_response = response.json()
-                    logger.info(f"Successfully initiated call: {call_response.get('id')}")
+                    # Success
+                    response_data = response.json()
+                    call_id = response_data.get("id")
+                    
+                    logger.info(f"VAPI Call SUCCESS - Call ID: {call_id}")
+                    logger.info(f"Full VAPI Response: {response_data}")
+                    
                     return {
                         "success": True,
-                        "call_id": call_response.get("id"),
-                        "status": call_response.get("status"),
-                        "data": call_response
-                    }
-                else:
-                    error_msg = f"VAPI call failed: {response.status_code} - {response.text}"
-                    logger.error(error_msg)
-                    return {
-                        "success": False,
-                        "error": error_msg
+                        "call_id": call_id,
+                        "vapi_response": response_data,
+                        "formatted_phone": formatted_phone
                     }
                     
+                else:
+                    # Error from VAPI
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get("message", f"HTTP {response.status_code}")
+                    except:
+                        error_msg = f"HTTP {response.status_code}: {response.text}"
+                    
+                    logger.error(f"VAPI Call FAILED - Status: {response.status_code}")
+                    logger.error(f"VAPI Error: {error_msg}")
+                    logger.error(f"VAPI Response Text: {response.text}")
+                    
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "status_code": response.status_code,
+                        "response_text": response.text
+                    }
+                    
+        except httpx.TimeoutException:
+            error_msg = "VAPI request timeout"
+            logger.error(f"VAPI Error: {error_msg}")
+            return {"success": False, "error": error_msg}
+            
+        except httpx.RequestError as e:
+            error_msg = f"VAPI request error: {str(e)}"
+            logger.error(f"VAPI Error: {error_msg}")
+            return {"success": False, "error": error_msg}
+            
         except Exception as e:
-            error_msg = f"Error making VAPI call: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error": error_msg
-            }
+            error_msg = f"Unexpected error in VAPI call: {str(e)}"
+            logger.error(f"VAPI Error: {error_msg}")
+            return {"success": False, "error": error_msg}
     
     async def get_call_status(self, call_id: str) -> Dict[str, Any]:
         """Get the status of a VAPI call"""
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
                     f"{self.base_url}/call/{call_id}",
-                    headers=headers,
-                    timeout=30.0
+                    headers=self.headers
                 )
                 
                 if response.status_code == 200:
                     call_data = response.json()
-                    
-                    # Calculate duration properly
-                    duration = None
-                    started_at = call_data.get("startedAt")
-                    ended_at = call_data.get("endedAt")
-                    
-                    if started_at and ended_at:
-                        duration = self._calculate_duration(started_at, ended_at)
-                    
                     return {
                         "success": True,
                         "status": call_data.get("status"),
-                        "duration": duration,
+                        "data": call_data,
+                        "duration": call_data.get("duration"),
                         "recording_url": call_data.get("recordingUrl"),
                         "transcript": call_data.get("transcript"),
-                        "analysis": call_data.get("analysis", {}),
-                        "data": call_data
+                        "analysis": call_data.get("analysis", {})
                     }
                 else:
                     logger.error(f"Failed to get call status: {response.status_code} - {response.text}")
                     return {
                         "success": False,
-                        "error": f"Failed to get call status: {response.status_code}"
+                        "error": f"HTTP {response.status_code}: {response.text}"
                     }
                     
         except Exception as e:
-            logger.error(f"Error getting call status: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            logger.error(f"Error getting call status for {call_id}: {e}")
+            return {"success": False, "error": str(e)}
     
     async def get_call_recording(self, call_id: str) -> Optional[str]:
         """Get the recording URL for a completed call"""
@@ -375,101 +361,170 @@ CALL FLOW:
 Remember to be natural and conversational while gathering this information efficiently."""
 
     async def is_valid_call_time(self, phone_number: str) -> bool:
-        """
-        Check if the current time is valid for making outbound calls to the given phone number
-        based on telemarketing regulations.
-        
-        Returns:
-            bool: True if it's a valid time to call, False otherwise
-        """
+        """Check if current time is valid for calling based on timezone"""
         try:
-            # Default to True in case we can't determine time zone
-            # This ensures calls won't be blocked due to technical issues
-            if not phone_number:
-                logger.warning("Empty phone number provided to is_valid_call_time")
-                return False
+            # Extract area code for timezone determination
+            phone_digits = ''.join(filter(str.isdigit, phone_number))
+            if len(phone_digits) >= 10:
+                area_code = phone_digits[-10:-7]  # Get first 3 digits of 10-digit number
                 
-            return self._is_valid_call_time_for_datetime(phone_number, datetime.now())
-        except Exception as e:
-            logger.error(f"Error in is_valid_call_time: {e}")
-            return True  # Default to allowing calls if there's an error
-    
-    def _is_valid_call_time_for_datetime(self, phone_number: str, check_time: datetime) -> bool:
-        """
-        Check if a specific datetime is valid for making outbound calls to the given phone number.
-        
-        Args:
-            phone_number: The phone number to call
-            check_time: The UTC datetime to check
-            
-        Returns:
-            bool: True if it's a valid time to call, False otherwise
-        """
-        try:
-            # Only call Monday-Friday (not on weekends)
-            if check_time.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-                logger.info(f"Call to {phone_number} rejected: weekend calling not allowed")
-                return False
-                
-            # Get the time zone for the phone number based on area code
-            phone_tz = self._get_timezone_for_phone(phone_number)
-            if not phone_tz:
-                logger.warning(f"Could not determine time zone for {phone_number}, defaulting to Eastern")
-                phone_tz = pytz.timezone("US/Eastern")
-                
-            # Convert current time to the recipient's time zone
-            recipient_time = check_time.astimezone(phone_tz)
-            recipient_hour = recipient_time.hour
-            
-            # Check if the time is between allowed hours (9 AM - 6 PM)
-            if recipient_hour < self.min_call_hour or recipient_hour >= self.max_call_hour:
-                logger.info(f"Call to {phone_number} rejected: outside allowed hours (time: {recipient_time.strftime('%H:%M')} {phone_tz.zone})")
-                return False
-                
-            logger.info(f"Call time valid for {phone_number}: {recipient_time.strftime('%H:%M')} {phone_tz.zone}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error validating call time for {phone_number}: {e}")
-            return True  # Default to allowing calls if there's an error
-            
-    def _get_timezone_for_phone(self, phone_number: str) -> Optional[pytz.timezone]:
-        """
-        Determine the timezone for a US phone number based on area code.
-        
-        Args:
-            phone_number: The phone number to check
-            
-        Returns:
-            Optional[pytz.timezone]: The timezone for the phone number, or None if it can't be determined
-        """
-        try:
-            # Clean the phone number
-            cleaned = re.sub(r'[^0-9]', '', phone_number)
-            
-            # Extract area code
-            if len(cleaned) >= 10:
-                if cleaned.startswith('1') and len(cleaned) >= 11:
-                    area_code = cleaned[1:4]
-                else:
-                    area_code = cleaned[0:3]
+                # Map area codes to timezones (basic mapping for US)
+                timezone_map = {
+                    # Eastern Time
+                    "201": "US/Eastern", "202": "US/Eastern", "203": "US/Eastern",
+                    "212": "US/Eastern", "215": "US/Eastern", "216": "US/Eastern",
+                    "240": "US/Eastern", "267": "US/Eastern", "301": "US/Eastern",
+                    "302": "US/Eastern", "304": "US/Eastern", "305": "US/Eastern",
+                    "321": "US/Eastern", "347": "US/Eastern", "352": "US/Eastern",
+                    "386": "US/Eastern", "401": "US/Eastern", "404": "US/Eastern",
+                    "407": "US/Eastern", "410": "US/Eastern", "412": "US/Eastern",
+                    "413": "US/Eastern", "434": "US/Eastern", "443": "US/Eastern",
+                    "470": "US/Eastern", "475": "US/Eastern", "478": "US/Eastern",
+                    "484": "US/Eastern", "508": "US/Eastern", "516": "US/Eastern",
+                    "518": "US/Eastern", "561": "US/Eastern", "570": "US/Eastern",
+                    "585": "US/Eastern", "607": "US/Eastern", "610": "US/Eastern",
+                    "617": "US/Eastern", "646": "US/Eastern", "678": "US/Eastern",
+                    "681": "US/Eastern", "689": "US/Eastern", "703": "US/Eastern",
+                    "704": "US/Eastern", "706": "US/Eastern", "717": "US/Eastern",
+                    "718": "US/Eastern", "724": "US/Eastern", "727": "US/Eastern",
+                    "732": "US/Eastern", "734": "US/Eastern", "740": "US/Eastern",
+                    "754": "US/Eastern", "757": "US/Eastern", "762": "US/Eastern",
+                    "772": "US/Eastern", "774": "US/Eastern", "781": "US/Eastern",
+                    "786": "US/Eastern", "787": "US/Eastern", "803": "US/Eastern",
+                    "813": "US/Eastern", "828": "US/Eastern", "843": "US/Eastern",
+                    "845": "US/Eastern", "848": "US/Eastern", "850": "US/Eastern",
+                    "856": "US/Eastern", "857": "US/Eastern", "859": "US/Eastern",
+                    "860": "US/Eastern", "863": "US/Eastern", "865": "US/Eastern",
+                    "878": "US/Eastern", "904": "US/Eastern", "908": "US/Eastern",
+                    "910": "US/Eastern", "912": "US/Eastern", "914": "US/Eastern",
+                    "917": "US/Eastern", "919": "US/Eastern", "929": "US/Eastern",
+                    "934": "US/Eastern", "937": "US/Eastern", "941": "US/Eastern",
+                    "947": "US/Eastern", "954": "US/Eastern", "959": "US/Eastern",
+                    "970": "US/Eastern", "973": "US/Eastern", "978": "US/Eastern",
+                    "980": "US/Eastern", "984": "US/Eastern", "985": "US/Eastern",
                     
-                logger.info(f"Extracted area code {area_code} from {phone_number}")
+                    # Central Time
+                    "205": "US/Central", "214": "US/Central", "217": "US/Central",
+                    "218": "US/Central", "224": "US/Central", "225": "US/Central",
+                    "228": "US/Central", "251": "US/Central", "254": "US/Central",
+                    "256": "US/Central", "260": "US/Central", "262": "US/Central",
+                    "281": "US/Central", "309": "US/Central", "312": "US/Central",
+                    "314": "US/Central", "316": "US/Central", "318": "US/Central",
+                    "319": "US/Central", "320": "US/Central", "334": "US/Central",
+                    "337": "US/Central", "361": "US/Central", "409": "US/Central",
+                    "414": "US/Central", "417": "US/Central", "430": "US/Central",
+                    "432": "US/Central", "469": "US/Central", "479": "US/Central",
+                    "501": "US/Central", "502": "US/Central", "504": "US/Central",
+                    "507": "US/Central", "512": "US/Central", "515": "US/Central",
+                    "563": "US/Central", "573": "US/Central", "580": "US/Central",
+                    "601": "US/Central", "608": "US/Central", "612": "US/Central",
+                    "618": "US/Central", "620": "US/Central", "630": "US/Central",
+                    "636": "US/Central", "641": "US/Central", "651": "US/Central",
+                    "660": "US/Central", "662": "US/Central", "682": "US/Central",
+                    "708": "US/Central", "712": "US/Central", "713": "US/Central",
+                    "715": "US/Central", "731": "US/Central", "737": "US/Central",
+                    "763": "US/Central", "769": "US/Central", "773": "US/Central",
+                    "779": "US/Central", "785": "US/Central", "806": "US/Central",
+                    "807": "US/Central", "815": "US/Central", "816": "US/Central",
+                    "817": "US/Central", "830": "US/Central", "832": "US/Central",
+                    "847": "US/Central", "870": "US/Central", "901": "US/Central",
+                    "903": "US/Central", "913": "US/Central", "915": "US/Central",
+                    "918": "US/Central", "920": "US/Central", "936": "US/Central",
+                    "940": "US/Central", "952": "US/Central", "956": "US/Central",
+                    "972": "US/Central", "979": "US/Central", "985": "US/Central",
+                    
+                    # Mountain Time
+                    "303": "US/Mountain", "307": "US/Mountain", "385": "US/Mountain",
+                    "406": "US/Mountain", "435": "US/Mountain", "480": "US/Mountain",
+                    "505": "US/Mountain", "520": "US/Mountain", "575": "US/Mountain",
+                    "602": "US/Mountain", "623": "US/Mountain", "719": "US/Mountain",
+                    "720": "US/Mountain", "801": "US/Mountain", "928": "US/Mountain",
+                    
+                    # Pacific Time
+                    "206": "US/Pacific", "209": "US/Pacific", "213": "US/Pacific",
+                    "253": "US/Pacific", "310": "US/Pacific", "323": "US/Pacific",
+                    "341": "US/Pacific", "360": "US/Pacific", "415": "US/Pacific",
+                    "424": "US/Pacific", "442": "US/Pacific", "510": "US/Pacific",
+                    "530": "US/Pacific", "541": "US/Pacific", "559": "US/Pacific",
+                    "562": "US/Pacific", "619": "US/Pacific", "626": "US/Pacific",
+                    "628": "US/Pacific", "650": "US/Pacific", "657": "US/Pacific",
+                    "661": "US/Pacific", "669": "US/Pacific", "707": "US/Pacific",
+                    "714": "US/Pacific", "747": "US/Pacific", "760": "US/Pacific",
+                    "805": "US/Pacific", "818": "US/Pacific", "831": "US/Pacific",
+                    "858": "US/Pacific", "909": "US/Pacific", "916": "US/Pacific",
+                    "925": "US/Pacific", "949": "US/Pacific", "951": "US/Pacific"
+                }
                 
-                # Look up timezone based on area code first 3 digits
-                for zone_name, codes in self.area_code_to_timezone.items():
-                    if area_code in codes:
-                        tz_id = self.us_timezones.get(zone_name)
-                        if tz_id:
-                            return pytz.timezone(tz_id)
-                            
-                # Default to Eastern if no match
-                logger.warning(f"No timezone match for area code {area_code}, defaulting to Eastern")
-                return pytz.timezone("US/Eastern")
+                # Get timezone for area code
+                tz_name = timezone_map.get(area_code, "US/Eastern")  # Default to Eastern
+                local_tz = pytz.timezone(tz_name)
+                
+                # Get current time in local timezone
+                utc_now = datetime.now(timezone.utc)
+                local_time = utc_now.astimezone(local_tz)
+                current_hour = local_time.hour
+                
+                # Check if within calling hours (8 AM to 9 PM local time)
+                # Extended hours for testing: 6 AM to 11 PM
+                if 6 <= current_hour <= 23:
+                    logger.debug(f"Valid call time for {phone_number} (area code {area_code}): "
+                               f"{local_time.strftime('%I:%M %p %Z')}")
+                    return True
+                else:
+                    logger.warning(f"Invalid call time for {phone_number} (area code {area_code}): "
+                                 f"{local_time.strftime('%I:%M %p %Z')} - outside 6 AM to 11 PM")
+                    return False
+                    
             else:
-                logger.warning(f"Phone number too short to extract area code: {phone_number}")
-                return None
+                logger.warning(f"Invalid phone number format for timezone check: {phone_number}")
+                return True  # Allow call if we can't determine timezone
                 
         except Exception as e:
-            logger.error(f"Error getting timezone for {phone_number}: {e}")
-            return None
+            logger.error(f"Error checking call time for {phone_number}: {e}")
+            return True  # Allow call on error
+    
+    async def get_assistant_info(self) -> Dict[str, Any]:
+        """Get information about the configured assistant"""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/assistant/{self.assistant_id}",
+                    headers=self.headers
+                )
+                
+                if response.status_code == 200:
+                    assistant_data = response.json()
+                    logger.info(f"Assistant Info: {assistant_data.get('name', 'Unknown')} - "
+                              f"Model: {assistant_data.get('model', {}).get('model', 'Unknown')}")
+                    return {"success": True, "data": assistant_data}
+                else:
+                    logger.error(f"Failed to get assistant info: {response.status_code}")
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                    
+        except Exception as e:
+            logger.error(f"Error getting assistant info: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def test_connection(self) -> Dict[str, Any]:
+        """Test VAPI connection and API key"""
+        try:
+            # Test by getting assistant info
+            assistant_info = await self.get_assistant_info()
+            
+            if assistant_info.get("success"):
+                return {
+                    "success": True,
+                    "message": "VAPI connection successful",
+                    "assistant": assistant_info.get("data", {}).get("name", "Unknown")
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"VAPI connection failed: {assistant_info.get('error')}"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"VAPI connection test failed: {str(e)}"
+            }
