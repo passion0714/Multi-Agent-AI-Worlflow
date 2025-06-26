@@ -243,7 +243,7 @@ class VoiceAgent:
                 logger.info(f"Lead {lead.id}: VAPI call SUCCESS - Call ID: {call_result.get('call_id')}")
                 
                 # Start monitoring call completion in background
-                asyncio.create_task(self._monitor_call_completion(lead, call_result.get("call_id"), db.query(Lead).filter(Lead.id == lead.id).first()))
+                asyncio.create_task(self._monitor_call_completion(lead.id, call_result.get("call_id")))
                 
             else:
                 # FAILURE: Log the exact error
@@ -271,9 +271,9 @@ class VoiceAgent:
         db.commit()
         logger.info(f"Lead {lead.id}: Call processing completed")
     
-    async def _monitor_call_completion(self, lead: Lead, call_id: str, updated_lead: Lead):
+    async def _monitor_call_completion(self, lead_id: int, call_id: str):
         """Monitor call completion and process results"""
-        logger.info(f"Lead {lead.id}: Starting call monitoring for call {call_id}")
+        logger.info(f"Lead {lead_id}: Starting call monitoring for call {call_id}")
         
         max_wait_time = 300  # 5 minutes max wait
         check_interval = 15  # Check every 15 seconds
@@ -290,25 +290,35 @@ class VoiceAgent:
                 
                 if call_status.get("success"):
                     status = call_status.get("status")
-                    logger.debug(f"Lead {lead.id}: Call status check - {status}")
+                    logger.debug(f"Lead {lead_id}: Call status check - {status}")
                     
                     if status in ["completed", "ended", "failed"]:
-                        logger.info(f"Lead {lead.id}: Call completed with status: {status}")
-                        await self._process_call_completion(updated_lead, call_status, db)
+                        logger.info(f"Lead {lead_id}: Call completed with status: {status}")
+                        
+                        # Get fresh lead object from database
+                        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+                        if lead:
+                            await self._process_call_completion(lead, call_status, db)
+                        else:
+                            logger.error(f"Lead {lead_id}: Lead not found in database")
                         return
                         
                 else:
-                    logger.warning(f"Lead {lead.id}: Failed to get call status: {call_status.get('error')}")
+                    logger.warning(f"Lead {lead_id}: Failed to get call status: {call_status.get('error')}")
             
             # Timeout reached
-            logger.warning(f"Lead {lead.id}: Call monitoring timeout reached")
-            self._update_lead_status(updated_lead, LeadStatus.CALL_FAILED, db, error="Call monitoring timeout")
-            db.commit()
+            logger.warning(f"Lead {lead_id}: Call monitoring timeout reached")
+            lead = db.query(Lead).filter(Lead.id == lead_id).first()
+            if lead:
+                self._update_lead_status(lead, LeadStatus.CALL_FAILED, db, error="Call monitoring timeout")
+                db.commit()
             
         except Exception as e:
-            logger.error(f"Lead {lead.id}: Error monitoring call: {e}")
-            self._update_lead_status(updated_lead, LeadStatus.CALL_FAILED, db, error=f"Monitoring error: {str(e)}")
-            db.commit()
+            logger.error(f"Lead {lead_id}: Error monitoring call: {e}")
+            lead = db.query(Lead).filter(Lead.id == lead_id).first()
+            if lead:
+                self._update_lead_status(lead, LeadStatus.CALL_FAILED, db, error=f"Monitoring error: {str(e)}")
+                db.commit()
         finally:
             db.close()
 
@@ -373,15 +383,74 @@ class VoiceAgent:
             analysis = call_status.get("analysis", {})
             transcript = call_status.get("transcript", "")
             
-            # Default extraction logic (can be enhanced with better AI analysis)
-            return {
-                "interested": analysis.get("interested", True),  # Default to True if unclear
-                "tcpa_consent": analysis.get("tcpa_consent", False),
+            logger.debug(f"Extracting call data - Analysis: {analysis}, Transcript length: {len(transcript)}")
+            
+            # Check VAPI's success evaluation first
+            success_eval = analysis.get("successEvaluation")
+            if success_eval is not None:
+                # Handle string boolean values from VAPI
+                if isinstance(success_eval, str):
+                    success_eval = success_eval.lower() == "true"
+                
+                logger.info(f"VAPI successEvaluation: {success_eval}")
+                
+                # If VAPI says call was unsuccessful, mark as not interested
+                if not success_eval:
+                    logger.info("VAPI marked call as unsuccessful, treating as not interested")
+                    return {
+                        "interested": False,
+                        "tcpa_consent": False,
+                        "email": None,
+                        "phone": None,
+                        "address": None,
+                        "area_of_interest": None
+                    }
+            
+            # Try to get structured analysis from VAPI
+            interested = analysis.get("interested")
+            tcpa_consent = analysis.get("tcpa_consent")
+            
+            # If VAPI analysis is missing, try transcript-based analysis
+            if interested is None or tcpa_consent is None:
+                logger.info("VAPI analysis incomplete, falling back to transcript analysis")
+                transcript_analysis = self._analyze_transcript(transcript)
+                
+                if interested is None:
+                    interested = transcript_analysis.get("interested")
+                if tcpa_consent is None:
+                    tcpa_consent = transcript_analysis.get("tcpa_consent")
+            
+            # If still unclear, check call duration and basic completion
+            if interested is None:
+                duration = call_status.get("duration", 0)
+                
+                # Handle None duration
+                if duration is None:
+                    duration = 0
+                
+                if duration < 30:
+                    interested = False
+                    logger.info(f"Short call duration ({duration}s), assuming not interested")
+                else:
+                    # Default to interested for completed calls of reasonable length
+                    interested = True
+                    logger.info(f"Reasonable call duration ({duration}s), defaulting to interested")
+            
+            # TCPA consent defaults to False unless explicitly confirmed
+            if tcpa_consent is None:
+                tcpa_consent = False
+            
+            result = {
+                "interested": interested,
+                "tcpa_consent": tcpa_consent,
                 "email": analysis.get("confirmed_email"),
                 "phone": analysis.get("confirmed_phone"),
                 "address": analysis.get("confirmed_address"),
                 "area_of_interest": analysis.get("area_of_interest")
             }
+            
+            logger.info(f"Final extracted data: {result}")
+            return result
             
         except Exception as e:
             logger.error(f"Error extracting confirmed data: {e}")
@@ -389,6 +458,70 @@ class VoiceAgent:
                 "interested": False,
                 "tcpa_consent": False
             }
+    
+    def _analyze_transcript(self, transcript: str) -> Dict[str, Any]:
+        """Analyze transcript for keywords when VAPI analysis is incomplete"""
+        if not transcript:
+            return {"interested": None, "tcpa_consent": None}
+        
+        transcript_lower = transcript.lower()
+        
+        # Check for voicemail/answering machine indicators
+        voicemail_keywords = [
+            "voicemail", "leave a message", "after the beep", "mailbox",
+            "please call back", "when you're available", "reach me at"
+        ]
+        
+        is_voicemail = any(keyword in transcript_lower for keyword in voicemail_keywords)
+        if is_voicemail:
+            logger.info("Transcript indicates voicemail - treating as no contact")
+            return {"interested": False, "tcpa_consent": False}
+        
+        # Keywords for interest
+        positive_keywords = [
+            "yes", "interested", "sounds good", "tell me more", "sign me up",
+            "i want", "i need", "when can", "how much", "what's the cost"
+        ]
+        
+        negative_keywords = [
+            "not interested", "no thank you", "remove me", "don't call",
+            "stop calling", "not right now", "maybe later", "busy"
+        ]
+        
+        # Keywords for TCPA consent
+        consent_keywords = [
+            "yes, you can call", "okay to call", "consent", "agree",
+            "you may contact", "fine to call"
+        ]
+        
+        no_consent_keywords = [
+            "don't call", "no calls", "remove", "do not contact"
+        ]
+        
+        # Analyze interest
+        interested = None
+        positive_score = sum(1 for keyword in positive_keywords if keyword in transcript_lower)
+        negative_score = sum(1 for keyword in negative_keywords if keyword in transcript_lower)
+        
+        if positive_score > negative_score:
+            interested = True
+        elif negative_score > positive_score:
+            interested = False
+        # If tied or no keywords, leave as None
+        
+        # Analyze TCPA consent
+        tcpa_consent = None
+        consent_score = sum(1 for keyword in consent_keywords if keyword in transcript_lower)
+        no_consent_score = sum(1 for keyword in no_consent_keywords if keyword in transcript_lower)
+        
+        if consent_score > 0 and consent_score > no_consent_score:
+            tcpa_consent = True
+        elif no_consent_score > 0:
+            tcpa_consent = False
+        # If no clear consent language, leave as None (will default to False)
+        
+        logger.debug(f"Transcript analysis: interested={interested}, tcpa_consent={tcpa_consent}")
+        return {"interested": interested, "tcpa_consent": tcpa_consent}
 
     def _update_lead_status(self, lead: Lead, status: LeadStatus, db: Session, error: Optional[str] = None):
         """Update lead status with proper logging"""

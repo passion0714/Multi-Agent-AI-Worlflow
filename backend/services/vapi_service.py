@@ -19,7 +19,17 @@ class VAPIService:
         self.base_url = "https://api.vapi.ai"
         self.assistant_id = os.getenv("VAPI_ASSISTANT_ID", "08301bb7-72c5-466c-a0ba-ca54d429c93e")
         
+        # Phone number configuration for outbound calls
+        self.phone_number_id = os.getenv("VAPI_PHONE_NUMBER_ID")
+        self.phone_number = os.getenv("VAPI_PHONE_NUMBER")  # Fallback phone number
+        
         logger.info(f"VAPI Service initialized with Assistant ID: {self.assistant_id}")
+        if self.phone_number_id:
+            logger.info(f"Using Phone Number ID: {self.phone_number_id}")
+        elif self.phone_number:
+            logger.info(f"Using Phone Number: {self.phone_number}")
+        else:
+            logger.warning("No VAPI phone number configured - outbound calls may fail")
         
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -83,7 +93,11 @@ class VAPIService:
         # Validate required configuration
         if not self.api_key:
             raise ValueError("VAPI_API_KEY environment variable is required")
-        # Note: phone_number_id no longer required - VAPI handles this automatically
+        
+        # Check phone number configuration
+        if not self.phone_number_id and not self.phone_number:
+            logger.warning("Neither VAPI_PHONE_NUMBER_ID nor VAPI_PHONE_NUMBER is configured")
+            logger.warning("Outbound calls will fail without a phone number configuration")
     
     def _format_phone_number(self, phone: str) -> str:
         """Format phone number to E.164 format"""
@@ -167,6 +181,18 @@ class VAPIService:
                 }
             }
             
+            # Add phone number configuration for outbound calling
+            if self.phone_number_id:
+                payload["phoneNumberId"] = self.phone_number_id
+                logger.info(f"Using phoneNumberId: {self.phone_number_id}")
+            elif self.phone_number:
+                payload["phoneNumber"] = self.phone_number
+                logger.info(f"Using phoneNumber: {self.phone_number}")
+            else:
+                error_msg = "No VAPI phone number configured (need VAPI_PHONE_NUMBER_ID or VAPI_PHONE_NUMBER)"
+                logger.error(f"VAPI Error: {error_msg}")
+                return {"success": False, "error": error_msg}
+            
             logger.info(f"VAPI Call Payload: {payload}")
             
             # Make the API call to VAPI
@@ -225,7 +251,7 @@ class VAPIService:
             error_msg = f"VAPI request error: {str(e)}"
             logger.error(f"VAPI Error: {error_msg}")
             return {"success": False, "error": error_msg}
-            
+                    
         except Exception as e:
             error_msg = f"Unexpected error in VAPI call: {str(e)}"
             logger.error(f"VAPI Error: {error_msg}")
@@ -368,7 +394,7 @@ Remember to be natural and conversational while gathering this information effic
             if len(phone_digits) >= 10:
                 area_code = phone_digits[-10:-7]  # Get first 3 digits of 10-digit number
                 
-                # Map area codes to timezones (basic mapping for US)
+                # Map area codes to timezones (enhanced mapping for US)
                 timezone_map = {
                     # Eastern Time
                     "201": "US/Eastern", "202": "US/Eastern", "203": "US/Eastern",
@@ -433,12 +459,15 @@ Remember to be natural and conversational while gathering this information effic
                     "940": "US/Central", "952": "US/Central", "956": "US/Central",
                     "972": "US/Central", "979": "US/Central", "985": "US/Central",
                     
-                    # Mountain Time
+                    # Mountain Time (excluding Arizona)
                     "303": "US/Mountain", "307": "US/Mountain", "385": "US/Mountain",
-                    "406": "US/Mountain", "435": "US/Mountain", "480": "US/Mountain",
-                    "505": "US/Mountain", "520": "US/Mountain", "575": "US/Mountain",
-                    "602": "US/Mountain", "623": "US/Mountain", "719": "US/Mountain",
-                    "720": "US/Mountain", "801": "US/Mountain", "928": "US/Mountain",
+                    "406": "US/Mountain", "435": "US/Mountain", "505": "US/Mountain",
+                    "575": "US/Mountain", "719": "US/Mountain", "720": "US/Mountain",
+                    "801": "US/Mountain",
+                    
+                    # Arizona (Mountain Standard Time year-round, no DST)
+                    "480": "US/Arizona", "520": "US/Arizona", "602": "US/Arizona",
+                    "623": "US/Arizona", "928": "US/Arizona",
                     
                     # Pacific Time
                     "206": "US/Pacific", "209": "US/Pacific", "213": "US/Pacific",
@@ -464,21 +493,24 @@ Remember to be natural and conversational while gathering this information effic
                 local_time = utc_now.astimezone(local_tz)
                 current_hour = local_time.hour
                 
-                # Check if within calling hours (8 AM to 9 PM local time)
-                # Extended hours for testing: 6 AM to 11 PM
-                if 6 <= current_hour <= 23:
-                    logger.debug(f"Valid call time for {phone_number} (area code {area_code}): "
-                               f"{local_time.strftime('%I:%M %p %Z')}")
+                # TCPA compliant calling hours: 8 AM to 9 PM local time
+                # For testing/debugging, we can extend to 6 AM to 11 PM
+                min_hour = 8  # 8 AM
+                max_hour = 21  # 9 PM (21:00)
+                
+                if min_hour <= current_hour < max_hour:
+                    logger.debug(f"Valid call time for {phone_number} (area code {area_code}, {tz_name}): "
+                               f"{local_time.strftime('%I:%M %p %Z')} - ALLOWED")
                     return True
                 else:
-                    logger.warning(f"Invalid call time for {phone_number} (area code {area_code}): "
-                                 f"{local_time.strftime('%I:%M %p %Z')} - outside 6 AM to 11 PM")
+                    logger.warning(f"Invalid call time for {phone_number} (area code {area_code}, {tz_name}): "
+                                 f"{local_time.strftime('%I:%M %p %Z')} - outside {min_hour}:00 AM to {max_hour}:00 PM")
                     return False
                     
             else:
                 logger.warning(f"Invalid phone number format for timezone check: {phone_number}")
                 return True  # Allow call if we can't determine timezone
-                
+            
         except Exception as e:
             logger.error(f"Error checking call time for {phone_number}: {e}")
             return True  # Allow call on error
